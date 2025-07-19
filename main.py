@@ -19,6 +19,13 @@ app.add_middleware(
 )
 
 
+@app.get("/", response_class=HTMLResponse)
+def read_root():
+    return """
+    <h1>Welcome to FileWay backend</h1>
+    <p>Backend is running ✅</p>
+    <p>Go to <a href="https://fileway.vercel.app/" target="_blank">FileWay – One-stop solution for all your file types 📁⚡🛠️✨/a></p>
+    """
 
 @app.post("/merge-pdfs")
 async def merge_pdfs(request: Request):
