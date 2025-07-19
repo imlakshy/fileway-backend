@@ -7,6 +7,7 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageOps
 import requests
 import io
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
@@ -18,14 +19,116 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FileWay Backend</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #121212;
+      font-family: 'Inter', Arial, sans-serif;
+    }
+    .container {
+      background: #000;
+      border-radius: 18px;
+      box-shadow: 0 8px 32px rgba(20, 20, 40, 0.32);
+      padding: 48px 36px;
+      max-width: 420px;
+      text-align: center;
+    }
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 18px;
+      color: #74a1af;
+      letter-spacing: -1px;
+      line-height: 1.1;
+    }
+    .fileway {
+      font-size: 3.6rem;
+      font-weight: 800;
+      color: #943900;
+      letter-spacing: -2px;
+      display: inline-block;
+      margin: 10px 0 4px 0;
+    }
+    .backend {
+      color: #b8b8b8;
+    }
+    p {
+      font-size: 1.1rem;
+      color: #b8b8b8;
+      margin: 16px 0;
+    }
+    a {
+      color: #ff9800;
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.2s;
+    }
+    a:hover {
+      color: #7a3306;
+      text-decoration: underline;
+    }
+    .status {
+      display: inline-block;
+      background: #1a1a1a;
+      color: #943900;
+      font-weight: 600;
+      border-radius: 8px;
+      padding: 4px 12px;
+      margin-bottom: 8px;
+      font-size: 1rem;
+      box-shadow: 0 2px 8px rgba(122,51,6,0.10);
+    }
+    .tagline {
+      font-size: 1.08rem;
+      color: #ffb26b;
+      font-weight: 500;
+      margin: 18px 0 0 0;
+      letter-spacing: 0.01em;
+      background: #1a1a1a;
+      border-radius: 8px;
+      padding: 10px 0 10px 0;
+      box-shadow: 0 2px 8px rgba(122,51,6,0.10);
+      text-align: center;
+      transition: background 0.2s;
+    }
+    .tagline .emoji {
+      font-size: 1.2em;
+      margin-left: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>
+      Welcome to <br>
+      <span class="fileway">FileWay</span><br>
+      backend
+    </h1>
+    <div class="status">Backend is running ✅</div>
+    <p>Go to <a href="https://fileway.vercel.app/" target="_blank">Frontend</a></p>
+    <div class="tagline">One-stop solution for all your file types <span class="emoji">⚡🛠️✨</span></div>
+  </div>
+</body>
+</html>
+"""
+
 
 @app.get("/", response_class=HTMLResponse)
-def read_root():
-    return """
-    <h1>Welcome to FileWay backend</h1>
-    <p>Backend is running ✅</p>
-    <p>Go to <a href="https://fileway.vercel.app/" target="_blank">FileWay – One-stop solution for all your file types 📁⚡🛠️✨/a></p>
-    """
+async def root():
+    return HTML
 
 @app.post("/merge-pdfs")
 async def merge_pdfs(request: Request):
