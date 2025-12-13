@@ -429,10 +429,10 @@ async def pdf_to_images(request: Request):
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)  # type: ignore
                 
                 img_buffer = io.BytesIO()
-                img.save(img_buffer, format="PNG")
+                img.save(img_buffer, format="JPEG")
                 img_buffer.seek(0)
                 
-                zip_file.writestr(f"page_{page_num + 1}.png", img_buffer.getvalue())
+                zip_file.writestr(f"page_{page_num + 1}.jpg", img_buffer.getvalue())
         
         doc.close()
         zip_buffer.seek(0)
