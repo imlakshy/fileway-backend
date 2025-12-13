@@ -421,9 +421,28 @@ async def pdf_to_images(request: Request):
         pdf_stream = io.BytesIO(response.content)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         
+        num_pages = len(doc)
+        
+        # If only 1 page, return single JPG file
+        if num_pages == 1:
+            page = doc[0]
+            pix = page.get_pixmap(dpi=150)  # type: ignore
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)  # type: ignore
+            
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format="JPEG")
+            img_buffer.seek(0)
+            
+            doc.close()
+            
+            return StreamingResponse(img_buffer, media_type="image/jpeg", headers={
+                "Content-Disposition": "inline; filename=page_1.jpg"
+            })
+        
+        # If multiple pages, return zip file
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for page_num in range(len(doc)):
+            for page_num in range(num_pages):
                 page = doc[page_num]
                 pix = page.get_pixmap(dpi=150)  # type: ignore
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)  # type: ignore
@@ -444,3 +463,200 @@ async def pdf_to_images(request: Request):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error converting PDF to images: {str(e)}")
+
+@app.post("/pdf-to-word")
+async def pdf_to_word(request: Request):
+    try:
+        data = await request.json()
+        pdf_url = data.get("pdf_urls")
+        
+        if not pdf_url:
+            raise HTTPException(status_code=400, detail="Missing PDF URL.")
+        
+        if isinstance(pdf_url, list):
+            pdf_url = pdf_url[0]
+        
+        response = requests.get(pdf_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF.")
+        
+        pdf_stream = io.BytesIO(response.content)
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        
+        from docx import Document
+        
+        word_doc = Document()
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            
+            if text.strip():
+                word_doc.add_paragraph(text)
+                if page_num < len(doc) - 1:
+                    word_doc.add_page_break()
+        
+        doc.close()
+        
+        output_buffer = io.BytesIO()
+        word_doc.save(output_buffer)
+        output_buffer.seek(0)
+        
+        return StreamingResponse(output_buffer, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers={
+            "Content-Disposition": "attachment; filename=converted.docx"
+        })
+    
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to Word: {str(e)}")
+
+@app.post("/pdf-to-excel")
+async def pdf_to_excel(request: Request):
+    try:
+        data = await request.json()
+        pdf_url = data.get("pdf_urls")
+        
+        if not pdf_url:
+            raise HTTPException(status_code=400, detail="Missing PDF URL.")
+        
+        if isinstance(pdf_url, list):
+            pdf_url = pdf_url[0]
+        
+        response = requests.get(pdf_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF.")
+        
+        pdf_stream = io.BytesIO(response.content)
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        
+        from openpyxl import Workbook
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "PDF Content"
+        
+        row_num = 1
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            
+            if text.strip():
+                lines = text.split('\n')
+                for line in lines:
+                    if line.strip():
+                        ws.cell(row=row_num, column=1, value=line.strip())
+                        row_num += 1
+                
+                ws.cell(row=row_num, column=1, value=f"--- Page {page_num + 1} ---")
+                row_num += 1
+        
+        doc.close()
+        
+        output_buffer = io.BytesIO()
+        wb.save(output_buffer)
+        output_buffer.seek(0)
+        
+        return StreamingResponse(output_buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
+            "Content-Disposition": "attachment; filename=converted.xlsx"
+        })
+    
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to Excel: {str(e)}")
+
+@app.post("/pdf-to-powerpoint")
+async def pdf_to_powerpoint(request: Request):
+    try:
+        data = await request.json()
+        pdf_url = data.get("pdf_urls")
+        
+        if not pdf_url:
+            raise HTTPException(status_code=400, detail="Missing PDF URL.")
+        
+        if isinstance(pdf_url, list):
+            pdf_url = pdf_url[0]
+        
+        response = requests.get(pdf_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF.")
+        
+        pdf_stream = io.BytesIO(response.content)
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        
+        from pptx import Presentation
+        from pptx.util import Inches
+        
+        prs = Presentation()
+        prs.slide_width = Inches(10)
+        prs.slide_height = Inches(7.5)
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            
+            slide_layout = prs.slide_layouts[1]
+            slide = prs.slides.add_slide(slide_layout)
+            
+            title = slide.shapes.title
+            title.text = f"Page {page_num + 1}"
+            
+            content = slide.placeholders[1]
+            tf = content.text_frame
+            tf.text = text[:1000] if len(text) > 1000 else text
+            
+            if len(text) > 1000:
+                p = tf.add_paragraph()
+                p.text = "...(content truncated)"
+        
+        doc.close()
+        
+        output_buffer = io.BytesIO()
+        prs.save(output_buffer)
+        output_buffer.seek(0)
+        
+        return StreamingResponse(output_buffer, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", headers={
+            "Content-Disposition": "attachment; filename=converted.pptx"
+        })
+    
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to PowerPoint: {str(e)}")
+
+@app.post("/pdf-to-text")
+async def pdf_to_text(request: Request):
+    try:
+        data = await request.json()
+        pdf_url = data.get("pdf_urls")
+        
+        if not pdf_url:
+            raise HTTPException(status_code=400, detail="Missing PDF URL.")
+        
+        if isinstance(pdf_url, list):
+            pdf_url = pdf_url[0]
+        
+        response = requests.get(pdf_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF.")
+        
+        pdf_stream = io.BytesIO(response.content)
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        
+        text_content = ""
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            text_content += f"--- Page {page_num + 1} ---\n\n"
+            text_content += text + "\n\n"
+        
+        doc.close()
+        
+        text_buffer = io.BytesIO(text_content.encode('utf-8'))
+        text_buffer.seek(0)
+        
+        return StreamingResponse(text_buffer, media_type="text/plain", headers={
+            "Content-Disposition": "attachment; filename=converted.txt"
+        })
+    
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to text: {str(e)}")
