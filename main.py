@@ -7,6 +7,7 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageOps
 import requests
 import io
+import zipfile
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
@@ -400,3 +401,46 @@ async def encrypt_pdf(request: Request):
     except Exception as e:
         print("❌ Error:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/pdf-to-images")
+async def pdf_to_images(request: Request):
+    try:
+        data = await request.json()
+        pdf_url = data.get("pdf_urls")
+        
+        if not pdf_url:
+            raise HTTPException(status_code=400, detail="Missing PDF URL.")
+        
+        if isinstance(pdf_url, list):
+            pdf_url = pdf_url[0]
+        
+        response = requests.get(pdf_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download PDF.")
+        
+        pdf_stream = io.BytesIO(response.content)
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                pix = page.get_pixmap(dpi=150)  # type: ignore
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)  # type: ignore
+                
+                img_buffer = io.BytesIO()
+                img.save(img_buffer, format="PNG")
+                img_buffer.seek(0)
+                
+                zip_file.writestr(f"page_{page_num + 1}.png", img_buffer.getvalue())
+        
+        doc.close()
+        zip_buffer.seek(0)
+        
+        return StreamingResponse(zip_buffer, media_type="application/zip", headers={
+            "Content-Disposition": "attachment; filename=pdf_images.zip"
+        })
+    
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting PDF to images: {str(e)}")
