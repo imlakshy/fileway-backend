@@ -1,5 +1,5 @@
 import traceback
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfMerger, PdfReader, PdfWriter
@@ -675,3 +675,87 @@ async def pdf_to_text(request: Request):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error converting PDF to text: {str(e)}")
+
+###==================================================================###
+
+@app.post("/changeImgExt")
+async def convert_image_urls(request: Request):
+    try:
+        data = await request.json()
+        img_urls = data.get("img_urls", [])
+        desired_ext = data.get("UserDesiredConvertedExtension")
+
+        if not img_urls or not isinstance(img_urls, list):
+            raise HTTPException(status_code=400, detail="img_urls must be a non-empty array.")
+
+        # Accept formats like: ["JPEG","PNG","WEBP","PDF","GIF","BMP","TIFF","ICO","PPM","EPS"]
+        desired = (desired_ext or "").strip().upper().lstrip(".")
+        allowed_formats = {
+            "JPEG": {"ext": "jpg", "mime": "image/jpeg"},
+            "JPG": {"ext": "jpg", "mime": "image/jpeg"},
+            "PNG": {"ext": "png", "mime": "image/png"},
+            "WEBP": {"ext": "webp", "mime": "image/webp"},
+            "PDF": {"ext": "pdf", "mime": "application/pdf"},
+            "GIF": {"ext": "gif", "mime": "image/gif"},
+            "BMP": {"ext": "bmp", "mime": "image/bmp"},
+            "TIFF": {"ext": "tiff", "mime": "image/tiff"},
+            "TIF": {"ext": "tiff", "mime": "image/tiff"},
+            "ICO": {"ext": "ico", "mime": "image/x-icon"},
+            "PPM": {"ext": "ppm", "mime": "image/x-portable-pixmap"},
+            "EPS": {"ext": "eps", "mime": "application/postscript"},
+        }
+
+        if desired not in allowed_formats:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported format. Use one of: JPEG, PNG, WEBP, PDF, GIF, BMP, TIFF, ICO, PPM, EPS",
+            )
+
+        target_format = "JPEG" if desired == "JPG" else desired
+        out_ext = allowed_formats[desired]["ext"]
+        out_mime = allowed_formats[desired]["mime"]
+
+        def _convert_one(file_bytes: bytes) -> bytes:
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                if target_format == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+                    img = img.convert("RGB")
+                out = io.BytesIO()
+                img.save(out, format=target_format)
+                return out.getvalue()
+
+        def _download(url: str) -> bytes:
+            resp = requests.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download image: {url}")
+            return resp.content
+
+        # Single URL -> return image directly
+        if len(img_urls) == 1:
+            img_bytes = _download(img_urls[0])
+            converted = _convert_one(img_bytes)
+            return StreamingResponse(
+                io.BytesIO(converted),
+                media_type=out_mime,
+                headers={"Content-Disposition": f"attachment; filename=converted.{out_ext}"},
+            )
+
+        # Multiple URLs -> zip
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, url in enumerate(img_urls, start=1):
+                img_bytes = _download(url)
+                converted = _convert_one(img_bytes)
+                zf.writestr(f"image_{idx}.{out_ext}", converted)
+
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=converted_images.zip"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error converting image URLs: {str(e)}")
