@@ -759,3 +759,267 @@ async def convert_image_urls(request: Request):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error converting image URLs: {str(e)}")
+
+
+@app.post("/resizeImgByKB")
+async def resize_img_by_kb(request: Request):
+    """
+    Accepts JSON:
+      {
+        "img_urls": ["https://.../a.png", "https://.../b.webp"],
+        "sizeInKB": 200
+      }
+    Output:
+      - Always converts to JPEG/JPG
+      - If 1 url: returns a single JPG
+      - If >1 urls: returns a zip of JPGs
+      - Each output file will be <= sizeInKB (best-effort; will error if impossible)
+    """
+    try:
+        data = await request.json()
+        img_urls = data.get("img_urls", [])
+        size_kb = data.get("sizeInKB")
+
+        if not img_urls or not isinstance(img_urls, list):
+            raise HTTPException(status_code=400, detail="img_urls must be a non-empty array.")
+
+        if size_kb is None:
+            raise HTTPException(status_code=400, detail="sizeInKB is required.")
+
+        try:
+            target_kb = float(size_kb)
+        except Exception:
+            raise HTTPException(status_code=400, detail="sizeInKB must be a number.")
+
+        if target_kb <= 0:
+            raise HTTPException(status_code=400, detail="sizeInKB must be > 0.")
+
+        target_bytes = int(target_kb * 1024)
+
+        def _download(url: str) -> bytes:
+            resp = requests.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download image: {url}")
+            return resp.content
+
+        def _save_jpeg(
+            img: Image.Image,
+            quality: int,
+            *,
+            optimize: bool,
+            subsampling: int,
+        ) -> bytes:
+            out = io.BytesIO()
+            img.save(
+                out,
+                format="JPEG",
+                quality=quality,
+                optimize=optimize,
+                subsampling=subsampling,
+            )
+            return out.getvalue()
+
+        def _compress_to_target(file_bytes: bytes) -> bytes:
+            with Image.open(io.BytesIO(file_bytes)) as im:
+                # Normalize to RGB for JPEG
+                img = im.convert("RGB")
+                tolerance = 0.05  # aim within ±5%
+                lower = int(target_bytes * (1 - tolerance))
+                upper = int(target_bytes * (1 + tolerance))
+
+                def encode_at(img_: Image.Image, q: int) -> bytes:
+                    # For smaller outputs, optimize helps; for larger outputs, disable optimize.
+                    want_bigger = target_bytes > 0
+                    optimize = not want_bigger
+                    # subsampling=2 is smaller, subsampling=0 is larger/better quality
+                    subsampling = 2 if optimize else 0
+                    return _save_jpeg(img_, q, optimize=optimize, subsampling=subsampling)
+
+                # Helper: find closest by varying quality for a given image size
+                def best_by_quality(img_: Image.Image, q_min: int, q_max: int) -> bytes:
+                    best_bytes = None
+                    best_diff = None
+                    for q in range(q_max, q_min - 1, -1):
+                        b = _save_jpeg(
+                            img_,
+                            q,
+                            optimize=False if target_bytes >= lower else True,
+                            subsampling=0 if target_bytes >= lower else 2,
+                        )
+                        d = abs(len(b) - target_bytes)
+                        if best_diff is None or d < best_diff:
+                            best_bytes, best_diff = b, d
+                        if lower <= len(b) <= upper:
+                            return b
+                    return best_bytes  # type: ignore
+
+                # First try at original size: sweep quality to get close
+                current_best = best_by_quality(img, 10, 95)
+                if lower <= len(current_best) <= upper:
+                    return current_best
+
+                # If we need to SHRINK (target smaller than current best), downscale gradually
+                if len(current_best) > upper:
+                    w, h = img.size
+                    scale = 0.9
+                    while w > 50 and h > 50:
+                        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+                        resized = img.resize((nw, nh), Image.LANCZOS)
+                        candidate = best_by_quality(resized, 10, 95)
+                        if lower <= len(candidate) <= upper:
+                            return candidate
+                        current_best = candidate
+                        if len(candidate) <= upper:
+                            # best effort: closest under target
+                            return candidate
+                        w, h = nw, nh
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot compress image to the requested sizeInKB.",
+                    )
+
+                # If we need to ENLARGE (target larger than current best), upscale gradually
+                w, h = img.size
+                scale = 1.15
+                max_scale = 4.0
+                total_scale = 1.0
+                while total_scale < max_scale:
+                    if len(current_best) >= lower:
+                        break
+                    total_scale *= scale
+                    nw, nh = max(1, int(w * total_scale)), max(1, int(h * total_scale))
+                    up = img.resize((nw, nh), Image.LANCZOS)
+                    # Use settings that generally increase JPEG size
+                    candidate = _save_jpeg(up, 95, optimize=False, subsampling=0)
+                    current_best = candidate
+                    if lower <= len(candidate) <= upper:
+                        return candidate
+                    if len(candidate) >= lower:
+                        # now bracketed-ish; refine with quality sweep to get closer
+                        return best_by_quality(up, 10, 95)
+
+                # If still smaller than target even after upscaling, return best effort (largest we got)
+                return current_best
+
+        # Single URL -> return image directly
+        if len(img_urls) == 1:
+            img_bytes = _download(img_urls[0])
+            converted = _compress_to_target(img_bytes)
+            return StreamingResponse(
+                io.BytesIO(converted),
+                media_type="image/jpeg",
+                headers={"Content-Disposition": "attachment; filename=compressed.jpg"},
+            )
+
+        # Multiple URLs -> zip
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, url in enumerate(img_urls, start=1):
+                img_bytes = _download(url)
+                converted = _compress_to_target(img_bytes)
+                zf.writestr(f"image_{idx}.jpg", converted)
+
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=compressed_images.zip"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error resizing images: {str(e)}")
+
+
+@app.post("/resizeImgByHW")
+async def resize_img_by_height_width(request: Request):
+    try:
+        data = await request.json()
+        img_urls = data.get("img_urls", [])
+        width = data.get("width")
+        height = data.get("height")
+
+        if not img_urls or not isinstance(img_urls, list):
+            raise HTTPException(status_code=400, detail="img_urls must be a non-empty array.")
+
+        if width is None or height is None:
+            raise HTTPException(status_code=400, detail="width and height are required.")
+
+        try:
+            w = int(width)
+            h = int(height)
+        except Exception:
+            raise HTTPException(status_code=400, detail="width and height must be numbers.")
+
+        if w <= 0 or h <= 0:
+            raise HTTPException(status_code=400, detail="width and height must be > 0.")
+
+        def _download(url: str) -> bytes:
+            resp = requests.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download image: {url}")
+            return resp.content
+
+        # Map PIL format -> (extension, mime)
+        fmt_map = {
+            "JPEG": ("jpg", "image/jpeg"),
+            "JPG": ("jpg", "image/jpeg"),
+            "PNG": ("png", "image/png"),
+            "WEBP": ("webp", "image/webp"),
+            "GIF": ("gif", "image/gif"),
+            "BMP": ("bmp", "image/bmp"),
+            "TIFF": ("tiff", "image/tiff"),
+            "ICO": ("ico", "image/x-icon"),
+            "PPM": ("ppm", "image/x-portable-pixmap"),
+            "EPS": ("eps", "application/postscript"),
+            "PDF": ("pdf", "application/pdf"),
+        }
+
+        def _resize_keep_format(file_bytes: bytes) -> tuple[bytes, str, str]:
+            with Image.open(io.BytesIO(file_bytes)) as im:
+                pil_format = (im.format or "PNG").upper()
+                out_ext, out_mime = fmt_map.get(pil_format, ("png", "image/png"))
+
+                resized = im.resize((w, h), Image.LANCZOS)
+
+                # Handle modes when saving to formats that don't support alpha
+                save_format = pil_format if pil_format in fmt_map else "PNG"
+                if save_format in ("JPEG", "JPG") and resized.mode in ("RGBA", "LA", "P"):
+                    resized = resized.convert("RGB")
+
+                out = io.BytesIO()
+                resized.save(out, format=save_format)
+                return out.getvalue(), out_ext, out_mime
+
+        # Single URL -> return file directly
+        if len(img_urls) == 1:
+            img_bytes = _download(img_urls[0])
+            resized_bytes, out_ext, out_mime = _resize_keep_format(img_bytes)
+            return StreamingResponse(
+                io.BytesIO(resized_bytes),
+                media_type=out_mime,
+                headers={"Content-Disposition": f"attachment; filename=resized.{out_ext}"},
+            )
+
+        # Multiple URLs -> zip
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, url in enumerate(img_urls, start=1):
+                img_bytes = _download(url)
+                resized_bytes, out_ext, _ = _resize_keep_format(img_bytes)
+                zf.writestr(f"image_{idx}.{out_ext}", resized_bytes)
+
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=resized_images.zip"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error resizing images by height/width: {str(e)}")
