@@ -133,17 +133,10 @@ HTML = """
 async def root():
     return HTML
 
-import time
 
-START_TIME = time.time()
-
-@app.get("/health")
-def health():
-    uptime = time.time() - START_TIME
-    return {
-        "status": "ok",
-        "uptime": uptime
-    }
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
 
 
 @app.post("/merge-pdfs")
